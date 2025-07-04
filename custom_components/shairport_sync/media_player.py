@@ -41,6 +41,7 @@ SUPPORTED_FEATURES = (
     | MediaPlayerEntityFeature.NEXT_TRACK
     | MediaPlayerEntityFeature.PREVIOUS_TRACK
     | MediaPlayerEntityFeature.VOLUME_STEP
+    | MediaPlayerEntityFeature.VOLUME_SET
 )
 
 
@@ -86,6 +87,9 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
         self._album = None
         self._media_image = None
         self._subscriptions = []
+        self._volume_db = None
+        self._min_db = None
+        self._max_db = None
 
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
@@ -156,6 +160,29 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
             self._media_image = message.payload
             self.async_write_ha_state()
 
+        @callback
+        def volume_updated(msg) -> None:
+            """Handle volume MQTT message."""
+            try:
+                payload = msg.payload
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8")
+                parts = payload.split(",")
+                if len(parts) >= 4:
+                    # airplay_volume,volume,lowest_volume,highest_volume
+                    self._volume_db = float(parts[1])
+                    self._min_db = float(parts[2])
+                    self._max_db = float(parts[3])
+                    _LOGGER.debug(
+                        "Volume update: db=%s, min=%s, max=%s",
+                        self._volume_db,
+                        self._min_db,
+                        self._max_db,
+                    )
+                    self.async_write_ha_state()
+            except Exception as e:
+                _LOGGER.warning("Failed to parse volume MQTT payload: %s", e)
+
         topic_map = {
             TopLevelTopic.PLAY_START: (play_started, "utf-8"),
             TopLevelTopic.PLAY_RESUME: (play_started, "utf-8"),
@@ -166,6 +193,7 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
             TopLevelTopic.ALBUM: (set_metadata("album"), "utf-8"),
             TopLevelTopic.TITLE: (set_metadata("title"), "utf-8"),
             TopLevelTopic.COVER: (artwork_updated, None),
+            "volume": (volume_updated, "utf-8"),
         }
 
         for (top_level_topic, (topic_callback, encoding)) in topic_map.items():
@@ -246,6 +274,25 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
     def supported_features(self) -> int:
         """Flag media player features that are supported."""
         return SUPPORTED_FEATURES
+
+    @property
+    def volume_level(self) -> float | None:
+        """Return the volume as a value between 0.0 and 1.0."""
+        if self._volume_db is None or self._min_db is None or self._max_db is None:
+            return None
+        if self._max_db == self._min_db:
+            return 1.0
+        # Clamp pour éviter division par zéro ou valeurs hors bornes
+        return max(0.0, min(1.0, (self._volume_db - self._min_db) / (self._max_db - self._min_db)))
+
+    async def async_set_volume_level(self, volume: float) -> None:
+        """Set volume of media player. Volume is 0..1."""
+        if self._min_db is None or self._max_db is None:
+            _LOGGER.warning("Cannot set volume: min_db or max_db is None")
+            return
+        target_db = self._min_db + (self._max_db - self._min_db) * volume
+        # Envoyer la commande MQTT pour régler le volume (format à adapter si besoin)
+        await self._send_remote_command(f"volume:{target_db:.2f}")
 
     @property
     def device_class(self) -> MediaPlayerDeviceClass:
