@@ -183,6 +183,7 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
             except Exception as e:
                 _LOGGER.warning("Failed to parse volume MQTT payload: %s", e)
 
+        # Support both ssnc/pvol (recommandé) et volume (fallback)
         topic_map = {
             TopLevelTopic.PLAY_START: (play_started, "utf-8"),
             TopLevelTopic.PLAY_RESUME: (play_started, "utf-8"),
@@ -193,8 +194,16 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
             TopLevelTopic.ALBUM: (set_metadata("album"), "utf-8"),
             TopLevelTopic.TITLE: (set_metadata("title"), "utf-8"),
             TopLevelTopic.COVER: (artwork_updated, None),
-            "volume": (volume_updated, "utf-8"),
         }
+
+        # Ajout de la souscription au topic volume ssnc/pvol et fallback volume
+        volume_topics = [f"{self._base_topic}/ssnc/pvol", f"{self._base_topic}/volume"]
+        for topic in volume_topics:
+            _LOGGER.debug("Subscribing to topic %s with callback volume_updated", topic)
+            subscription = await async_subscribe(
+                self.hass, topic, volume_updated, encoding="utf-8"
+            )
+            self._subscriptions.append(subscription)
 
         for (top_level_topic, (topic_callback, encoding)) in topic_map.items():
             topic = f"{self._base_topic}/{top_level_topic}"
@@ -286,13 +295,38 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
         return max(0.0, min(1.0, (self._volume_db - self._min_db) / (self._max_db - self._min_db)))
 
     async def async_set_volume_level(self, volume: float) -> None:
-        """Set volume of media player. Volume is 0..1."""
+        """Set volume of media player by simulating with volumeup/volumedown until target reached."""
+        import asyncio
         if self._min_db is None or self._max_db is None:
             _LOGGER.warning("Cannot set volume: min_db or max_db is None")
             return
+        if self._volume_db is None:
+            _LOGGER.warning("Cannot set volume: current volume unknown")
+            return
         target_db = self._min_db + (self._max_db - self._min_db) * volume
-        # Envoyer la commande MQTT pour régler le volume (format à adapter si besoin)
-        await self._send_remote_command(f"volume:{target_db:.2f}")
+        tolerance = 0.5  # dB
+        max_attempts = 50
+        delay = 0.2  # seconds (200 ms)
+        attempts = 0
+        _LOGGER.debug(f"Start volume feedback loop: current={self._volume_db:.2f}dB, target={target_db:.2f}dB")
+        while attempts < max_attempts:
+            current_db = self._volume_db
+            if current_db is None:
+                await asyncio.sleep(delay)
+                attempts += 1
+                continue
+            diff = target_db - current_db
+            if abs(diff) <= tolerance:
+                _LOGGER.debug(f"Target volume reached: {current_db:.2f}dB ≈ {target_db:.2f}dB")
+                break
+            if diff > 0:
+                await self.async_volume_up()
+            else:
+                await self.async_volume_down()
+            await asyncio.sleep(delay)
+            attempts += 1
+        else:
+            _LOGGER.warning(f"Could not reach target volume {target_db:.2f}dB after {max_attempts} attempts (last={self._volume_db:.2f}dB)")
 
     @property
     def device_class(self) -> MediaPlayerDeviceClass:
