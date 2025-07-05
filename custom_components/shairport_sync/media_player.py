@@ -286,13 +286,15 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
 
     @property
     def volume_level(self) -> float | None:
-        """Return the volume as a value between 0.0 and 1.0."""
+        # Conversion logarithmique fidèle à AirPlay/iTunes
+        import math
         if self._volume_db is None or self._min_db is None or self._max_db is None:
             return None
-        if self._max_db == self._min_db:
-            return 1.0
-        # Clamp pour éviter division par zéro ou valeurs hors bornes
-        return max(0.0, min(1.0, (self._volume_db - self._min_db) / (self._max_db - self._min_db)))
+        min_lin = 10 ** (self._min_db / 20)
+        max_lin = 10 ** (self._max_db / 20)
+        cur_lin = 10 ** (self._volume_db / 20)
+        # Normalisé entre 0 et 1
+        return max(0.0, min(1.0, (cur_lin - min_lin) / (max_lin - min_lin)))
 
     async def async_set_volume_level(self, volume: float) -> None:
         """Set volume of media player by simulating with volumeup/volumedown until target reached."""
@@ -303,7 +305,12 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
         if self._volume_db is None:
             _LOGGER.warning("Cannot set volume: current volume unknown")
             return
-        target_db = self._min_db + (self._max_db - self._min_db) * volume
+        # Conversion inverse : pourcentage -> dB (échelle logarithmique)
+        import math
+        min_lin = 10 ** (self._min_db / 20)
+        max_lin = 10 ** (self._max_db / 20)
+        target_lin = min_lin + (max_lin - min_lin) * volume
+        target_db = 20 * math.log10(target_lin)
         tolerance = 0.5  # dB
         max_attempts = 50
         delay = 0.2  # seconds (200 ms)
