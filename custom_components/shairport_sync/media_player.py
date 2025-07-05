@@ -284,15 +284,27 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
         """Flag media player features that are supported."""
         return SUPPORTED_FEATURES
 
+    def _tapered_db_to_percent(self, db: float) -> float:
+        # Conversion dB -> pourcentage (dasl_tapered, perceptive)
+        # percent = 10 ** ((db - max_db) / 20)
+        import math
+        if self._max_db is None or db is None:
+            return 0.0
+        return max(0.0, min(1.0, 10 ** ((db - self._max_db) / 20)))
+
+    def _tapered_percent_to_db(self, percent: float) -> float:
+        # Conversion pourcentage -> dB (dasl_tapered, perceptive)
+        import math
+        if self._max_db is None or percent <= 0:
+            return self._min_db if self._min_db is not None else -30.0
+        return self._max_db + 20 * math.log10(percent)
+
     @property
     def volume_level(self) -> float | None:
-        # Conversion linéaire en dB (correspond à la majorité des configs Shairport Sync)
-        # Si la courbe "dasl_tapered" est activée, il peut y avoir un léger écart à bas volume.
+        # Conversion dasl_tapered (perceptive, comme Shairport Sync en mode par défaut)
         if self._volume_db is None or self._min_db is None or self._max_db is None:
             return None
-        if self._max_db == self._min_db:
-            return 1.0
-        return max(0.0, min(1.0, (self._volume_db - self._min_db) / (self._max_db - self._min_db)))
+        return self._tapered_db_to_percent(self._volume_db)
 
     async def async_set_volume_level(self, volume: float) -> None:
         """Set volume of media player by simulating with volumeup/volumedown until target reached."""
@@ -303,8 +315,8 @@ class ShairportSyncMediaPlayer(MediaPlayerEntity):
         if self._volume_db is None:
             _LOGGER.warning("Cannot set volume: current volume unknown")
             return
-        # Conversion inverse : pourcentage -> dB (échelle linéaire)
-        target_db = self._min_db + (self._max_db - self._min_db) * volume
+        # Conversion inverse : pourcentage -> dB (dasl_tapered, perceptive)
+        target_db = self._tapered_percent_to_db(volume)
         tolerance = 0.5  # dB
         max_attempts = 50
         delay = 0.2  # seconds (200 ms)
